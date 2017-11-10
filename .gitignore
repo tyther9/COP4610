@@ -2,3 +2,7 @@
 build/
 
 kern/compile/DUMBVM/
+
+kern/compile/
+
+kern/build
