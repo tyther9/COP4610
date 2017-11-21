@@ -33,20 +33,23 @@ sys_open(const_userptr_t upath, int flags, mode_t mode, int *retval)
 	struct openfile *file;
 	int result = 0;
 
-	/* 
-	 * Your implementation of system call open starts here.  
-	 *
-	 * Check the design document design/filesyscall.txt for the steps
-	 */
-	(void) upath; // suppress compilation warning until code gets written
-	(void) flags; // suppress compilation warning until code gets written
-	(void) mode; // suppress compilation warning until code gets written
-	(void) retval; // suppress compilation warning until code gets written
-	(void) allflags; // suppress compilation warning until code gets written
-	(void) kpath; // suppress compilation warning until code gets written
-	(void) file; // suppress compilation warning until code gets written
+     // Validate flags
+     if(flags < 0 || flags > allflags) { 
+     return EINVAL; }
 
-	return result;
+     if(upath == NULL) { 
+     return EINVAL; }
+
+     kpath  = (char *) kmalloc(sizeof(char)*PATH_MAX);
+     // copy over path to kernel
+     result = copyinstr(upath, kpath, sizeof(upath), NULL);
+
+     /* open a file (args must be kernel pointers; destroys filename) */
+     result = openfile_open(kpath, flags, mode, &file);
+     if(result) { 
+     return result; }
+
+     return filetable_place(curproc->p_filetable, file, retval);
 }
 
 /*
@@ -55,28 +58,132 @@ sys_open(const_userptr_t upath, int flags, mode_t mode, int *retval)
 int
 sys_read(int fd, userptr_t buf, size_t size, int *retval)
 {
-       int result = 0;
+     int result = 0;
+     struct openfile *thefile;
+     struct uio theuio;
+     struct iovec iov;
+     void *kbuf;     
+     
+     result = filetable_get(curproc->p_filetable, fd, &thefile);
 
-       /* 
-        * Your implementation of system call read starts here.  
-        *
-        * Check the design document design/filesyscall.txt for the steps
-        */
-       (void) fd; // suppress compilation warning until code gets written
-       (void) buf; // suppress compilation warning until code gets written
-       (void) size; // suppress compilation warning until code gets written
-       (void) retval; // suppress compilation warning until code gets written
+     // errors
+     if(result) { return result; }
+     if (thefile->of_accmode == O_WRONLY) { return EBADF; }
 
-       return result;
+     // initialize the kernel buffer
+     kbuf = kmalloc(sizeof(*buf)*size);
+     if(kbuf == NULL) { return EINVAL; }
+
+     lock_acquire(thefile->of_offsetlock);
+
+     iov.iov_ubase = (userptr_t)buf;
+     iov.iov_len = size;
+     theuio.uio_iov = &iov;
+     theuio.uio_iovcnt = 1;
+     theuio.uio_offset = thefile->of_offset;
+     theuio.uio_resid = size;
+     theuio.uio_segflg = UIO_USERSPACE;
+     theuio.uio_rw = UIO_READ;
+     theuio.uio_space = curproc->p_addrspace;
+
+     result = VOP_READ(thefile->of_vnode, &theuio);
+     if(result) 
+     {
+          kfree(kbuf);
+          lock_release(thefile->of_offsetlock);
+          return result;
+     }
+
+     *retval = size - theuio.uio_resid;
+
+     kfree(kbuf);
+     lock_release(thefile->of_offsetlock);
+
+     filetable_put(curproc->p_filetable, fd, thefile);
+
+     return result;
 }
 
 /*
  * write() - write data to a file
  */
+int
+sys_write(int fd, userptr_t buf, size_t size, int *retval)
+{
+     int result = 0;
+     struct openfile *thefile;
+     struct uio theuio;
+     struct iovec iov;
+     void *kbuf;     
+     
+     result = filetable_get(curproc->p_filetable, fd, &thefile);
 
+     // errors
+     if(result) { return result; }
+     //if (thefile->of_accmode == O_WRONLY) { return EBADF; }
+
+     // initialize the kernel buffer
+     kbuf = kmalloc(sizeof(*buf)*size);
+     if(kbuf == NULL) { return EINVAL; }
+
+     lock_acquire(thefile->of_offsetlock);
+
+     iov.iov_ubase = (userptr_t)buf;
+     iov.iov_len = size;
+     theuio.uio_iov = &iov;
+     theuio.uio_iovcnt = 1;
+     theuio.uio_offset = thefile->of_offset;
+     theuio.uio_resid = size;
+     theuio.uio_segflg = UIO_USERSPACE;
+     theuio.uio_rw = UIO_WRITE;
+     theuio.uio_space = curproc->p_addrspace;
+
+     result = VOP_WRITE(thefile->of_vnode, &theuio);
+     if(result) 
+     {
+          kfree(kbuf);
+          lock_release(thefile->of_offsetlock);
+          return result;
+     }
+
+     *retval = size - theuio.uio_resid;
+
+     kfree(kbuf);
+     lock_release(thefile->of_offsetlock);
+
+     filetable_put(curproc->p_filetable, fd, thefile);
+
+     return result;
+}
 /*
  * close() - remove from the file table.
  */
+int
+sys_close(int fd, int *retval) 
+{
+     int result = 0;
+     struct openfile *thefile;
+
+     result = filetable_get(curproc->p_filetable, fd, &thefile);
+     if(result)
+     {
+          return result;
+     }
+
+     if(thefile->of_refcount == 1) 
+     {
+          // kfree(&thefile);
+          filetable_placeat(curproc->p_filetable, NULL, fd, &thefile);
+     } 
+     else 
+     {
+          openfile_decref(thefile);
+     }
+
+     *retval = 0;
+     return 0;
+}
+
 
 /* 
 * meld () - combine the content of two files word by word into a new file
